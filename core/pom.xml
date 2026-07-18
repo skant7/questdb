@@ -33,6 +33,13 @@
         <outputPath>target</outputPath>
         <runtime.assembly>none</runtime.assembly>
         <javac.target>25</javac.target>
+        <!-- Defaults so a wrong JDK fails with a clear enforcer message instead of
+             "JDK version can't be empty" when the java25+ profile is inactive. -->
+        <java.enforce.version>25</java.enforce.version>
+        <javac.compile.source>${javac.target}</javac.compile.source>
+        <javac.compile.target>${javac.target}</javac.compile.target>
+        <excludePattern1>nothing-to-exclude-dummy-value-include-all-java11plus</excludePattern1>
+        <excludeTestPattern1>nothing-to-exclude-dummy-value-include-all-java11plus</excludeTestPattern1>
         <argLine>-ea -Dfile.encoding=UTF-8 -XX:+UseParallelGC --sun-misc-unsafe-memory-access=allow --enable-native-access=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.time.zone=ALL-UNNAMED --add-exports=java.base/jdk.internal.vm=ALL-UNNAMED --add-exports=java.base/jdk.internal.vm=io.questdb</argLine>
         <test.exclude>None</test.exclude>
         <test.include>%regex[.*[^o].class]</test.include><!-- exclude module-info.class-->

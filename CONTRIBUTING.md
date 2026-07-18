@@ -123,21 +123,33 @@ to JIT functionality, use an x86-64 machine or run an x86-64 JDK under Rosetta e
 ### Setting up Java and `JAVA_HOME`
 
 `JAVA_HOME` is required by Maven. It is possible to have multiple versions of
-Java on the same platform. Please set up `JAVA_HOME` to point to Java 25.
-Other versions of Java will not work. If you are new to Java please check
-that `JAVA_HOME` is pointing to the root of the Java directory:
+Java on the same platform. Please set up `JAVA_HOME` to point to **Java 25**.
+Java 21 and earlier fail the build enforcer; Java 26+ can break the client
+module (`FDBigInteger` is package-private there). If you are new to Java please
+check that `JAVA_HOME` is pointing to the root of the Java directory:
 `C:\Users\me\dev\jdk-25` and **not** `C:\Users\me\dev\jdk-25\bin\java`.
 
-Linux/macOS
+Linux/macOS (Homebrew):
 
 ```bash
-export JAVA_HOME="/path/to/java/"
+export JAVA_HOME="$(/usr/libexec/java_home -v 25 2>/dev/null || echo /opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home)"
+export PATH="$JAVA_HOME/bin:$PATH"
+java -version   # must report 25.x
+```
+
+Linux/macOS (SDKMAN):
+
+```bash
+sdk install java 25.0.3-tem
+sdk default java 25.0.3-tem
+# or, in this repo: sdk env   # uses .sdkmanrc
+java -version   # must report 25.x
 ```
 
 Windows
 
 ```bash
-set JAVA_HOME="c:\path\to\java directory"
+set JAVA_HOME=c:\path\to\jdk-25
 ```
 
 ### Compiling Java and frontend code

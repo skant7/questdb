@@ -187,15 +187,15 @@ offending character, not the start of the expression.
 
 ### Prerequisites
 
-- Java 11+ (64-bit)
+- Java 25 64-bit (strict requirement; JDK 26+ may fail client compile)
 - Maven 3
-- `JAVA_HOME` environment variable set
+- `JAVA_HOME` environment variable set to a JDK 25 install
 
 ### Building
 
 ```bash
 # Build JAR without tests (fastest)
-mvn clean package -DskipTests -P local-client
+mvn clean package -DskipTests
 
 # Build with web console
 mvn clean package -DskipTests -P build-web-console
@@ -204,15 +204,10 @@ mvn clean package -DskipTests -P build-web-console
 mvn clean package -DskipTests -P build-web-console,build-binaries
 ```
 
-When you build just the core module with `mvn -pl core`, it will fall use a
-pre-built java-questdb-client module, installed in the local Maven cache. It may
-be stale and result in build errors. Fix this issue with:
-
-```bash
-cd java-questdb-client && mvn clean install -DskipTests && cd -
-```
-
-This should install a fresh version into the Maven cache.
+The vendored `java-questdb-client/` module is part of the reactor by default, so
+the `1.3.6-SNAPSHOT` client dependency resolves without a separate install.
+To force a released client from Maven Central, set
+`-Dquestdb.client.version=1.3.5` (or pin that version in `core/pom.xml`).
 
 ### Running Tests
 

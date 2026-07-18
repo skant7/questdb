@@ -1,0 +1,13 @@
+/*
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package one.profiler.test;
+
+public enum Jvm {
+    HOTSPOT,
+    HOTSPOT_C2,
+    ZING,
+    OPENJ9
+}

@@ -1,0 +1,576 @@
+/*
+ * Copyright The async-profiler authors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include "arguments.h"
+#include "os.h"
+
+
+// Arguments of the last start/resume command; reused for shutdown and restart
+Arguments _global_args;
+
+// Predefined value that denotes successful operation
+const Error Error::OK(NULL);
+
+// Extra buffer space for expanding file pattern
+const size_t EXTRA_BUF_SIZE = 512;
+
+// Statically compute hash code of a string containing up to 12 [a-z] letters
+#define HASH(s)  ((s[0] & 31LL)       | (s[1] & 31LL) <<  5 | (s[2]  & 31LL) << 10 | (s[3]  & 31LL) << 15 | \
+                  (s[4] & 31LL) << 20 | (s[5] & 31LL) << 25 | (s[6]  & 31LL) << 30 | (s[7]  & 31LL) << 35 | \
+                  (s[8] & 31LL) << 40 | (s[9] & 31LL) << 45 | (s[10] & 31LL) << 50 | (s[11] & 31LL) << 55)
+
+// Simulate switch statement over string hashes
+#define SWITCH(arg)    long long arg_hash = hash(arg); if (0)
+
+#define CASE(s)        } else if (arg_hash == HASH(s "            ")) {
+
+#define DEFAULT()      } else {
+
+
+// Parses agent arguments.
+// The format of the string is: arg[,arg...]
+Error Arguments::parse(const char* args) {
+    if (args == NULL) {
+        return Error::OK;
+    }
+
+    size_t len = strlen(args);
+    free(_buf);
+    _buf = (char*)malloc(len + EXTRA_BUF_SIZE + 1);
+    if (_buf == NULL) {
+        return Error("Not enough memory to parse arguments");
+    }
+    char* args_copy = strcpy(_buf + EXTRA_BUF_SIZE, args);
+
+    const char* msg = NULL;
+
+    for (char* arg = strtok(args_copy, ","); arg != NULL; arg = strtok(NULL, ",")) {
+        char* value = strchr(arg, '=');
+        if (value != NULL) *value++ = 0;
+
+        SWITCH (arg) {
+            // Actions
+            CASE("start")
+                _action = ACTION_START;
+
+            CASE("resume")
+                _action = ACTION_RESUME;
+
+            CASE("stop")
+                _action = ACTION_STOP;
+
+            CASE("dump")
+                _action = ACTION_DUMP;
+
+            CASE("status")
+                _action = ACTION_STATUS;
+
+            CASE("metrics")
+                _action = ACTION_METRICS;
+
+            CASE("list")
+                _action = ACTION_LIST;
+
+            CASE("version")
+                _action = ACTION_VERSION;
+
+            // Output formats
+            CASE("collapsed")
+                _output = OUTPUT_COLLAPSED;
+
+            CASE("flamegraph")
+                _output = OUTPUT_FLAMEGRAPH;
+
+            CASE("tree")
+                _output = OUTPUT_TREE;
+
+            CASE("jfr")
+                _output = OUTPUT_JFR;
+
+            CASE("jfropts")
+                _output = OUTPUT_JFR;
+                if (value == NULL) {
+                    msg = "Invalid jfropts";
+                } else if (value[0] >= '0' && value[0] <= '9') {
+                    _jfr_options = (int)strtol(value, NULL, 0);
+                } else if (strstr(value, "mem")) {
+                    _jfr_options |= IN_MEMORY;
+                }
+
+            CASE("jfrsync")
+                _output = OUTPUT_JFR;
+                _jfr_options |= JFR_SYNC_OPTS;
+                _jfr_sync = value == NULL ? "default" : value;
+
+            CASE("traces")
+                _output = OUTPUT_TEXT;
+                _dump_traces = value == NULL ? INT_MAX : atoi(value);
+
+            CASE("flat")
+                _output = OUTPUT_TEXT;
+                _dump_flat = value == NULL ? INT_MAX : atoi(value);
+
+            CASE("otlp")
+                _output = OUTPUT_OTLP;
+
+            CASE("samples")
+                _counter = COUNTER_SAMPLES;
+
+            CASE("total")
+                _counter = COUNTER_TOTAL;
+
+            CASE("chunksize")
+                if (value == NULL || (_chunk_size = parseUnits(value, BYTES)) < 0) {
+                    msg = "Invalid chunksize";
+                }
+
+            CASE("chunktime")
+                if (value == NULL || (_chunk_time = parseUnits(value, SECONDS)) < 0) {
+                    msg = "Invalid chunktime";
+                }
+
+            // Basic options
+            CASE("event")
+                if (value == NULL || value[0] == 0) {
+                    msg = "event must not be empty";
+                } else if (strcmp(value, EVENT_ALLOC) == 0) {
+                    if (_alloc < 0) _alloc = 0;
+                } else if (strcmp(value, EVENT_NATIVEMEM) == 0) {
+                    if (_nativemem < 0) _nativemem = 0;
+                } else if (strcmp(value, EVENT_LOCK) == 0) {
+                    if (_lock < 0) _lock = DEFAULT_LOCK_INTERVAL;
+                } else if (strcmp(value, EVENT_NATIVELOCK) == 0) {
+                    if (_nativelock < 0) _nativelock = DEFAULT_LOCK_INTERVAL;
+                } else if (_event != NULL && !_all) {
+                    msg = "Duplicate event argument";
+                } else {
+                    _event = value;
+                }
+
+            CASE("timeout")
+                if (value == NULL || (_timeout = parseTimeout(value)) == -1) {
+                    msg = "Invalid timeout";
+                }
+
+            CASE("loop")
+                if (value == NULL || (_loop = parseTimeout(value)) == -1) {
+                    msg = "Invalid loop duration";
+                }
+
+            CASE("memlimit")
+                _mem_limit = value == NULL ? 0 : parseUnits(value, BYTES);
+
+            CASE("alloc")
+                _alloc = value == NULL ? 0 : parseUnits(value, BYTES);
+
+            CASE("tlab")
+                _tlab = true;
+
+            CASE("nativemem")
+                _nativemem = value == NULL ? 0 : parseUnits(value, BYTES);
+
+            CASE("nofree")
+                _nofree = true;
+
+            CASE("trace")
+                _trace.push_back(value);
+
+            CASE("lock")
+                _lock = value == NULL ? DEFAULT_LOCK_INTERVAL : parseUnits(value, NANOS);
+
+            CASE("nativelock")
+                _nativelock = value == NULL ? DEFAULT_LOCK_INTERVAL : parseUnits(value, NANOS);
+
+            CASE("wall")
+                _wall = value == NULL ? 0 : parseUnits(value, NANOS);
+
+            CASE("proc")
+                _proc = value == NULL ? DEFAULT_PROC_INTERVAL : parseUnits(value, SECONDS);
+
+            CASE("cpu")
+                if (_event != NULL) {
+                    msg = "Duplicate event argument";
+                } else {
+                    _event = EVENT_CPU;
+                }
+
+            CASE("all")
+                _all = true;
+                _live = true;
+                if (_wall < 0) {
+                    _wall = 0;
+                }
+                if (_alloc < 0) {
+                    _alloc = 0;
+                }
+                if (_lock < 0) {
+                    _lock = DEFAULT_LOCK_INTERVAL;
+                }
+                if (_nativelock < 0) {
+                    _nativelock = DEFAULT_LOCK_INTERVAL;
+                }
+                if (_nativemem < 0) {
+                    _nativemem = DEFAULT_ALLOC_INTERVAL;
+                }
+
+                if (_proc < 0 && OS::isLinux()) {
+                    _proc = DEFAULT_PROC_INTERVAL;
+                }
+
+                if (_event == NULL && OS::isLinux()) {
+                    _event = EVENT_CPU;
+                }
+
+            CASE("interval")
+                if (value == NULL || (_interval = parseUnits(value, UNIVERSAL)) <= 0) {
+                    msg = "Invalid interval";
+                }
+
+            CASE("jstackdepth")
+                if (value == NULL || (_jstackdepth = atoi(value)) <= 0) {
+                    msg = "jstackdepth must be > 0";
+                } else {
+                    char* slash = strchr(value, '/');
+                    _truncated_stack_depth = slash != NULL ? atoi(slash + 1) : _jstackdepth;
+                }
+
+            CASE("signal")
+                if (value == NULL || (_signal = atoi(value)) <= 0) {
+                    msg = "signal must be > 0";
+                } else if ((value = strchr(value, '/')) != NULL) {
+                    // Two signals were specified: one for CPU profiling, another for wall clock
+                    _signal |= atoi(value + 1) << 8;
+                }
+
+            CASE("features")
+                if (value != NULL) {
+                    if (strstr(value, "stats"))    _features.stats = 1;
+                    if (strstr(value, "jnienv"))   _features.jnienv = 1;
+                    if (strstr(value, "agct"))     _features.agct = 1;
+                    if (strstr(value, "mixed"))    _features.mixed = 1;
+                    if (strstr(value, "vtable"))   _features.vtable_target = 1;
+                    if (strstr(value, "comptask")) _features.comp_task = 1;
+                    if (strstr(value, "pcaddr"))   _features.pc_addr = 1;
+                }
+
+            CASE("file")
+                if (value == NULL || value[0] == 0) {
+                    msg = "file must not be empty";
+                }
+                _file = value;
+
+            CASE("log")
+                _log = value == NULL || value[0] == 0 ? NULL : value;
+
+            CASE("loglevel")
+                if (value == NULL || value[0] == 0) {
+                    msg = "loglevel must not be empty";
+                }
+                _loglevel = value;
+
+            CASE("quiet")
+                _quiet = true;
+
+            CASE("server")
+                if (value == NULL || value[0] == 0) {
+                    msg = "server address must not be empty";
+                }
+                _server = value;
+
+            CASE("fdtransfer")
+                _fdtransfer = true;
+                if (value == NULL || value[0] == 0) {
+                    msg = "fdtransfer path must not be empty";
+                }
+                _fdtransfer_path = value;
+
+            // Filters
+            CASE("filter")
+                _filter = value == NULL ? "" : value;
+
+            CASE("include")
+                _include.push_back(value);
+
+            CASE("exclude")
+                _exclude.push_back(value);
+
+            CASE("threads")
+                _threads = true;
+
+            CASE("sched")
+                _sched = true;
+
+            CASE("record-cpu")
+                _record_cpu = true;
+
+            CASE("live")
+                _live = true;
+
+            CASE("nobatch")
+                _nobatch = true;
+
+            CASE("alluser")
+                _alluser = true;
+
+            CASE("cstack")
+                if (value != NULL) {
+                    if (strcmp(value, "fp") == 0) {
+                        _cstack = CSTACK_FP;
+                    } else if (strcmp(value, "dwarf") == 0) {
+                        _cstack = CSTACK_DWARF;
+                    } else if (strcmp(value, "vm") == 0) {
+                        _cstack = CSTACK_VM;
+                    } else if (strcmp(value, "vmx") == 0) {
+                        // cstack=vmx is a shorthand for cstack=vm,features=mixed
+                        _cstack = CSTACK_VM;
+                        _features.mixed = 1;
+                    } else {
+                        _cstack = CSTACK_NO;
+                    }
+                }
+
+            CASE("clock")
+                if (value != NULL) {
+                    if (value[0] == 't') {
+                        _clock = CLK_TSC;
+                    } else if (value[0] == 'm') {
+                        _clock = CLK_MONOTONIC;
+                    }
+                }
+
+            CASE("target-cpu")
+                if (value == NULL || (_target_cpu = atoi(value)) < 0) {
+                    _target_cpu = -1;
+                }
+
+            // Output style modifiers
+            CASE("simple")
+                _style |= STYLE_SIMPLE;
+
+            CASE("dot")
+                _style |= STYLE_DOTTED;
+
+            CASE("norm")
+                _style |= STYLE_NORMALIZE;
+
+            CASE("sig")
+                _style |= STYLE_SIGNATURES;
+
+            CASE("ann")
+                _style |= STYLE_ANNOTATE;
+
+            CASE("lib")
+                _style |= STYLE_LIB_NAMES;
+
+            CASE("mcache")
+                _mcache = value == NULL ? 1 : (unsigned char)strtol(value, NULL, 0);
+
+            CASE("begin")
+                _begin = value;
+
+            CASE("end")
+                _end = value;
+
+            CASE("nostop")
+                _nostop = true;
+
+            CASE("ttsp")
+                if (_begin != NULL || _end != NULL) {
+                    msg = "begin and end must both be empty when ttsp is set";
+                }
+                _begin = "SafepointSynchronize::begin";
+                _end = "RuntimeService::record_safepoint_synchronized";
+
+            // FlameGraph options
+            CASE("title")
+                _title = value;
+
+            CASE("minwidth")
+                if (value != NULL) _minwidth = atof(value);
+
+            CASE("reverse")
+                _reverse = true;
+
+            CASE("inverted")
+                _inverted = true;
+
+            DEFAULT()
+                if (_unknown_arg == NULL) _unknown_arg = arg;
+        }
+    }
+
+    // Return error only after parsing all arguments, when 'log' is already set
+    if (msg != NULL) {
+        return Error(msg);
+    }
+
+    if (_event == NULL && _alloc < 0 && _lock < 0 && _wall < 0 && _nativemem < 0 && _nativelock < 0 && _trace.empty()) {
+        _event = EVENT_CPU;
+    }
+
+    if (_file != NULL && _output == OUTPUT_NONE) {
+        _output = detectOutputFormat(_file);
+        if (_output == OUTPUT_SVG) {
+            return Error("SVG format is obsolete, use .html for FlameGraph");
+        }
+        _dump_traces = 100;
+        _dump_flat = 200;
+    }
+
+    if (_action == ACTION_NONE && _output != OUTPUT_NONE) {
+        _action = ACTION_DUMP;
+    }
+
+    return Error::OK;
+}
+
+const char* Arguments::file() {
+    if (_file != NULL && strchr(_file, '%') != NULL) {
+        return expandFilePattern(_file);
+    }
+    return _file;
+}
+
+// Returns true if the log file is a temporary file of asprof launcher
+bool Arguments::hasTemporaryLog() const {
+    return _log != NULL && strncmp(_log, "/tmp/asprof-log.", 16) == 0;
+}
+
+// Should match statically computed HASH(arg)
+long long Arguments::hash(const char* arg) {
+    long long h = 0;
+    for (int shift = 0; *arg != 0; shift += 5) {
+        h |= (*arg++ & 31LL) << shift;
+    }
+    return h;
+}
+
+// Expands the following patterns:
+//   %p       process id
+//   %t       timestamp (yyyyMMdd-hhmmss)
+//   %n{MAX}  sequence number
+//   %{ENV}   environment variable
+const char* Arguments::expandFilePattern(const char* pattern) {
+    char* ptr = _buf;
+    char* end = _buf + EXTRA_BUF_SIZE - 1;
+
+    while (ptr < end && *pattern != 0) {
+        char c = *pattern++;
+        if (c == '%') {
+            c = *pattern++;
+            if (c == 0) {
+                break;
+            } else if (c == 'p') {
+                ptr += snprintf(ptr, end - ptr, "%d", getpid());
+                continue;
+            } else if (c == 't') {
+                time_t timestamp = time(NULL);
+                struct tm t;
+                localtime_r(&timestamp, &t);
+                ptr += snprintf(ptr, end - ptr, "%d%02d%02d-%02d%02d%02d",
+                                t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+                                t.tm_hour, t.tm_min, t.tm_sec);
+                continue;
+            } else if (c == 'n') {
+                unsigned int max_files = 0;
+                const char* p;
+                if (*pattern == '{' && (p = strchr(pattern, '}')) != NULL) {
+                    max_files = atoi(pattern + 1);
+                    pattern = p + 1;
+                }
+                ptr += snprintf(ptr, end - ptr, "%u", max_files > 0 ? _file_num % max_files : _file_num);
+                continue;
+            } else if (c == '{') {
+                char env_key[128];
+                const char* p = strchr(pattern, '}');
+                if (p != NULL && p - pattern < sizeof(env_key)) {
+                    memcpy(env_key, pattern, p - pattern);
+                    env_key[p - pattern] = 0;
+                    const char* env_value = getenv(env_key);
+                    if (env_value != NULL) {
+                        ptr += snprintf(ptr, end - ptr, "%s", env_value);
+                        pattern = p + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        *ptr++ = c;
+    }
+
+    *(ptr < end ? ptr : end) = 0;
+    return _buf;
+}
+
+Output Arguments::detectOutputFormat(const char* file) {
+    const char* ext = strrchr(file, '.');
+    if (ext != NULL) {
+        if (strcmp(ext, ".html") == 0) {
+            return OUTPUT_FLAMEGRAPH;
+        } else if (strcmp(ext, ".jfr") == 0) {
+            return OUTPUT_JFR;
+        } else if (strcmp(ext, ".collapsed") == 0 || strcmp(ext, ".folded") == 0) {
+            return OUTPUT_COLLAPSED;
+        } else if (strcmp(ext, ".svg") == 0) {
+            return OUTPUT_SVG;
+        }
+    }
+    return OUTPUT_TEXT;
+}
+
+long Arguments::parseUnits(const char* str, const Multiplier* multipliers) {
+    char* end;
+    long result = strtol(str, &end, 0);
+    if (end == str) {
+        return -1;
+    }
+
+    char c = *end;
+    if (c == 0) {
+        return result;
+    }
+    if (c >= 'A' && c <= 'Z') {
+        c += 'a' - 'A';
+    }
+
+    for (const Multiplier* m = multipliers; m->symbol; m++) {
+        if (c == m->symbol) {
+            return result * m->multiplier;
+        }
+    }
+
+    return -1;
+}
+
+int Arguments::parseTimeout(const char* str) {
+    const char* p = strchr(str, ':');
+    if (p == NULL) {
+        return parseUnits(str, SECONDS);
+    }
+
+    int hh = str[0] >= '0' && str[0] <= '2' ? atoi(str) : 0xff;
+    int mm = p[1] >= '0' && p[1] <= '5' ? atoi(p + 1) : 0xff;
+    int ss = (p = strchr(p + 1, ':')) != NULL && p[1] >= '0' && p[1] <= '5' ? atoi(p + 1) : 0xff;
+    return 0xff000000 | hh << 16 | mm << 8 | ss;
+}
+
+Arguments::~Arguments() {
+    if (!_shared) free(_buf);
+}
+
+void Arguments::save() {
+    if (this != &_global_args) {
+        free(_global_args._buf);
+        _global_args = *this;
+        _shared = true;
+    }
+}
